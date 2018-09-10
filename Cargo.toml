@@ -1,0 +1,6 @@
+[package]
+name = "rsq"
+version = "0.1.0"
+authors = ["lirsacc <c.lirsac@gmail.com>"]
+
+[dependencies]
