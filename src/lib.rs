@@ -37,7 +37,7 @@ pub use errors::{Error, Result};
 static PREFIX: &'static str = "brokkr";
 
 /// Create a Redis connection.
-/// The connection url is looked up from the `BROKER_URL` environment variable
+/// The connection url is looked up from the `BROKKR_URL` environment variable
 /// and defaults to `redis://127.0.0.1/`.
 /// If you need a password, the url should look something like this:
 /// `redis://:password@127.0.0.1/`.
@@ -47,11 +47,11 @@ static PREFIX: &'static str = "brokkr";
 /// Panics if Redis endpoint cannot be reached.
 ///
 fn connect() -> Connection {
-  let broker_url = match ::std::env::var("BROKER_URL") {
+  let url = match ::std::env::var("BROKKR_URL") {
     Ok(u) => u.to_owned(),
     _ => "redis://127.0.0.1/".to_owned(),
   };
-  let client = redis::Client::open(broker_url.as_ref()).unwrap();
+  let client = redis::Client::open(url.as_ref()).unwrap();
   client.get_connection().unwrap()
 }
 
@@ -271,7 +271,7 @@ pub struct Brokkr {
 impl Brokkr {
   /// Create a new `Brokkr`.
   ///
-  /// The Redis url is taken from the `BROKER_URL` env variable falling
+  /// The Redis url is taken from the `BROKKR_URL` env variable falling
   /// back to `redis://127.0.0.1/`.
   /// You can add a password by prepending `:password` to the host.
   ///

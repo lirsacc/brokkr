@@ -62,4 +62,4 @@ Most tests that do some actual work will need to reach a redis server. If you ha
 docker run --name redis -p 6379:6379 -d redis:alpine
 ```
 
-If you run the redis server on a url that is not `redis://127.0.0.1/`, set the `BROKER_URL` environment variable first.
+If you run the redis server on a url that is not `redis://127.0.0.1/`, set the `BROKKR_URL` environment variable first.
