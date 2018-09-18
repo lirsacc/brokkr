@@ -1,8 +1,7 @@
 #[macro_use]
-extern crate log;
-#[macro_use]
 extern crate serde_derive;
 
+extern crate uuid;
 extern crate pretty_env_logger;
 
 extern crate brokkr;
@@ -11,7 +10,7 @@ use brokkr::{Brokkr, Perform, Worker};
 use std::thread::sleep;
 use std::time::Duration;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct Task {
   id: u64,
   msg: String,
@@ -35,41 +34,42 @@ impl Perform for Task {
 
 fn main() {
   pretty_env_logger::init();
-  let q = Brokkr::new("default".into());
-  let w: Worker<Task> = Worker::new(&q, (), Duration::from_millis(500));
+  let brokkr = Brokkr::new("default".into());
+  let w: Worker<Task> = Worker::new(&brokkr, (), Duration::from_millis(500));
+  let mut job_ids: Vec<uuid::Uuid> = vec!();
 
   // Clean up from previous runs.
-  q.clear_all().unwrap();
+  brokkr.clear_all().unwrap();
 
-  println!("Enqueuing jobs in {}", q.name);
+  println!("Enqueuing jobs in {}", brokkr.name);
 
-  let d = Duration::from_millis(3000);
+  let d = Duration::from_millis(100);
 
   for i in 0..10 {
     println!("Pushing job {}", i);
-    q.enqueue(Task {
+    let job_id = brokkr.enqueue::<Task, u64>(Task {
       id: i,
       msg: format!("Foo {}", i),
     }).unwrap();
+    job_ids.push(job_id);
     sleep(d);
   }
 
-  println!("Queue length: {}", q.len());
+  println!("Queue length: {}", brokkr.queue_size());
 
   for _ in 0..10 {
-    // println!("Fetching job");
-    // let j = q.dequeue::<Task>().unwrap().unwrap();
-    // println!("Fetched job {}, task {:?}", j.id, j.task);
-    // j.task.process(&());
+    let job_id = job_ids.remove(0);
     w.process_one();
+    let job = brokkr.fetch_job::<Task, u64>(&job_id);
+    println!("Job: {}", job.unwrap().unwrap());
     sleep(d);
   }
 
-  let t = q.dequeue::<Task>().unwrap();
+  let t = brokkr.dequeue::<Task, u64>().unwrap();
   println!("Fetched {:?}", t);
 
-  q.clear().unwrap();
+  brokkr.clear_queue().unwrap();
 
-  let t = q.dequeue::<Task>().unwrap();
+  let t = brokkr.dequeue::<Task, u64>().unwrap();
   println!("Fetched {:?}", t);
 }
