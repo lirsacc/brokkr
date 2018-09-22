@@ -39,8 +39,16 @@ impl Perform for Task {
 
 fn main() {
   pretty_env_logger::init();
+
   let brokkr = Brokkr::new("default".into());
-  let w: Worker<Task> = Worker::new(&brokkr, (), Duration::from_millis(500));
+
+  let w: Worker<Task> = Worker::new(
+    &brokkr,
+    (),
+    Duration::from_millis(500),
+    Duration::from_secs(10),
+  );
+
   let mut job_ids: Vec<uuid::Uuid> = vec![];
 
   // Clean up from previous runs.

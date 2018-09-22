@@ -2,7 +2,7 @@
 //!
 //! It allows queueing tasks and processing them in the background with
 //! independent workers and should be simple to integrate in existing
-//! applications.
+//! applications and deployments.
 //!
 
 #![deny(missing_docs)]
@@ -64,53 +64,53 @@ impl<T: DeserializeOwned + Serialize + Send + Sync + Sized> Encodable for T {}
 /// Possible statuses of a `Worker` process.
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum WorkerStatus {
-  /// The worker is waiting for jobs to be available
+  /// The worker is waiting for jobs to be available.
   Idle,
-  /// The worker is processing a job
+  /// The worker is processing a job.
   Busy,
 }
 
 /// The different states that a `Job` can be in.
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub enum JobState {
-  /// The job was created and in the queue
+  /// The job was created and in the queue.
   Queued,
-  /// The job has been picked by a `Worker` which is waiting for it to finish
+  /// The job has been picked by a `Worker` which is waiting for it to finish.
   Started,
-  /// The job has finished successfully
+  /// The job has finished successfully.
   Success,
-  /// The job failed in an expected way
+  /// The job failed in an expected way.
   Failed,
-  /// The job panicked
+  /// The job panicked.
   Panicked,
-  /// The job timed out
+  /// The job timed out.
   TimedOut,
 }
 
 /// A job and its metadata / state information.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Job<T, R> {
-  /// The unique id of this job
+  /// The unique id of this job.
   pub id: Uuid,
-  /// The actual application level task to be processed
+  /// The actual application level task to be processed.
   pub task: T,
-  /// Result of processing the task
+  /// Result of processing the task.
   pub result: Option<R>,
-  /// Failure information, that's the panic payload in case of panic or the
-  /// reported error in case of handled error
+  /// Failure information, that's the panic payload in case of panic or the.
+  /// reported error in case of handled error.
   pub failure_info: Option<String>,
-  /// Time when the job was created / queued
+  /// Time when the job was created / queued.
   pub created_at: NaiveDateTime,
-  /// Time when processing started for this job
+  /// Time when processing started for this job.
   pub started_at: Option<NaiveDateTime>,
-  /// Time when processing finished for this job
+  /// Time when processing finished for this job.
   pub processed_at: Option<NaiveDateTime>,
-  /// State of this job
+  /// State of this job.
   pub state: JobState,
 }
 
 impl<T: Encodable, R: Encodable> Job<T, R> {
-  /// Create a job given a task object
+  /// Create a job given a task object.
   pub fn new(task: T) -> Self {
     Self {
       task,
@@ -184,6 +184,13 @@ impl<T: Encodable, R: Encodable> Job<T, R> {
       _ => invalid_transition!(JobState::TimedOut, self.state),
     }
   }
+
+  fn has_failed(&self) -> bool {
+    match self.state {
+      JobState::Failed | JobState::Panicked => true,
+      _ => false,
+    }
+  }
 }
 
 impl<T: fmt::Debug, R: fmt::Debug> fmt::Display for Job<T, R> {
@@ -242,14 +249,21 @@ where
 {
   /// The result type for this task.
   type Result: Encodable + panic::RefUnwindSafe + 'static;
-  /// The error type for this task
+  /// The error type for this task.
   type Error: Encodable + panic::RefUnwindSafe + 'static;
   /// The type of the context value that will be given to this job's handler.
   /// This should be used to share long-lived objects such as database
   /// connections, global variables, etc.
   type Context: Clone + Send + Sync + panic::RefUnwindSafe + 'static;
 
-  /// Process this task.
+  /// Processing logic for this task.
+  /// Returning the `Result` type is considered a success for the task while
+  /// returning the `Error` type will mark the job as failed, including the
+  /// serialised error in the job metadata.
+  ///
+  /// You shoud try to avoid surfacing panics as much as possible, however if
+  /// this function does panic, the `Worker` will catch it and mark the job as
+  /// panicked.
   fn process(&self, c: &Self::Context) -> ::std::result::Result<Self::Result, Self::Error>;
 }
 
@@ -272,7 +286,7 @@ where
 /// struct TaskResult;
 ///
 /// # fn main() {
-/// let brkkr = Brokkr::new("default".to_owned());
+/// let brkkr = Brokkr::new("example_queue".to_owned());
 /// let job_id = brkkr.enqueue::<Task, TaskResult>(Task { name: "foo".to_owned() }).unwrap();
 ///
 /// match brkkr.dequeue::<Task, TaskResult>().unwrap() {
@@ -282,7 +296,7 @@ where
 ///     assert_eq!(j.id, job_id);
 ///    // You can now do something with it.
 ///   },
-///   None => unimplemented!(),
+///   None => panic!("Someone stole my job"),
 /// }
 ///
 /// // No more jobs to process
@@ -290,7 +304,6 @@ where
 /// # brkkr.clear_all();
 /// # }
 /// ```
-///
 pub struct Brokkr {
   /// Name of the queue.
   ///
@@ -312,7 +325,6 @@ impl Brokkr {
   /// # Arguments
   ///
   /// * `name` - Name of the queue.
-  ///
   pub fn new(name: String) -> Self {
     Self::with_connection(name, connect().unwrap())
   }
@@ -336,7 +348,6 @@ impl Brokkr {
   /// let con = client.get_connection().unwrap();
   /// let brkkr = Brokkr::with_connection("default".to_owned(), con);
   /// ```
-  ///
   pub fn with_connection(name: String, conn: Connection) -> Self {
     let queue_name = format!("{}:{}", PREFIX, name);
     Self {
@@ -371,7 +382,6 @@ impl Brokkr {
   /// Only use this if you are sure that all workers have been correctly
   /// stopped and results gathered as this might leave other processes in an
   /// inconcistent state.
-  ///
   pub fn clear_all(&self) -> Result<()> {
     delete_prefix(&self.conn, &self.queue_name)
   }
@@ -439,10 +449,23 @@ impl Brokkr {
     }
   }
 
-  fn set_job_result<T: Encodable, R: Encodable>(&self, job: &Job<T, R>) -> Result<()> {
-    self
-      .conn
-      .set(&self.job_key(&job.id), serde_json::to_string(job)?)?;
+  fn set_job_result<T: Encodable, R: Encodable>(
+    &self,
+    job: &Job<T, R>,
+    ttl: &time::Duration,
+  ) -> Result<()> {
+    // For failures, we do not set a ttl as the user is supposed to handle them.
+    if job.has_failed() {
+      self
+        .conn
+        .set(&self.job_key(&job.id), serde_json::to_string(job)?)?;
+    } else {
+      self.conn.set_ex(
+        &self.job_key(&job.id),
+        serde_json::to_string(job)?,
+        ttl.as_secs() as usize,
+      )?;
+    }
     Ok(())
   }
 
@@ -463,47 +486,98 @@ impl Brokkr {
   }
 }
 
-/// Worker process implementation.
+/// Worker process.
 ///
-/// A worker will register itself with the backend and send regular heartbeat
-/// messages / status update for monitoring.
+/// The worker is responsible for consuming a single queue and processing tasks
+/// as they become available. It will will register itself with the backend and
+/// send regular status update for monitoring.
 ///
-pub struct Worker<'a, T: Perform + Encodable + Clone> {
+/// The worker itself does not take care of concurrency. In order to process
+/// multiple tasks on the same machines you need to start multiple worker
+/// processes yourself.
+///
+/// # Usage
+///
+///
+/// ```rust,no_run
+/// # #[macro_use]
+/// # extern crate serde_derive;
+/// # extern crate brokkr;
+/// use std::time::Duration;
+/// use brokkr::{Brokkr, Worker, Perform};
+///
+/// #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
+/// struct Task {
+///   name: String
+/// }
+///
+/// #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+/// struct TaskResult;
+///
+/// impl Perform for Task {
+///   type Result = String;
+///   type Error = ();
+///   type Context = ();
+///
+///   fn process(&self, _: &Self::Context) -> Result<Self::Result, Self::Error> {
+///     Ok(format!("Done: {}", self.name).to_owned())
+///   }
+/// }
+/// # fn main() {
+///
+/// let brokkr = Brokkr::new("default".into());
+///
+/// let worker: Worker<Task> = Worker::new(
+///   &brokkr,
+///   (),
+///   Duration::from_millis(500),
+///   Duration::from_secs(10),
+/// );
+///
+/// worker.process_many(Duration::from_secs(1));
+/// # }
+/// ```
+pub struct Worker<'a, T: Perform + Clone> {
   brokkr: &'a Brokkr,
   id: String,
-  // TODO: Using interior mutability here to not expose a mutable reference to
+  // REVIEW: Using interior mutability here to not expose a mutable reference to
   // the user. Might not be necessary.
   status: Cell<WorkerStatus>,
   context: T::Context,
   timeout: time::Duration,
   period: time::Duration,
   heartbeat_period: time::Duration,
+  result_ttl: time::Duration,
+  // REVIEW: Interior mutability, see above.
   last_heartbeat: Cell<time::Instant>,
 }
 
-impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
+impl<'a, T: Perform + Clone> Worker<'a, T> {
   /// Create a worker process.
   ///
   /// # Arguments
   ///
-  /// * `brokkr`  - The broker to use to communicate with the Redis backend.
-  /// * `ctx`     - Context object. Use this for things which have costly
-  ///               initialization but should be available to all tasks during
-  ///               procssing.
-  /// * `timeout` - Job timeout. All tasks taking more than this duration to
-  ///               process will be marked as failed.
-  ///
-  ///
-  pub fn new(brokkr: &'a Brokkr, ctx: T::Context, timeout: time::Duration) -> Self {
-    let period = time::Duration::from_millis(100);
-    assert!(timeout >= period);
+  /// * `brokkr`      - The broker to use to communicate with the Redis backend.
+  /// * `ctx`         - Context object. Use this for things which have costly
+  ///                   initialization but should be available to all tasks
+  ///                   during procssing.
+  /// * `timeout`     - Job timeout. All tasks taking more than this duration
+  ///                   to process will be marked as failed.
+  /// * `result_ttl`  - Job result ttl.
+  pub fn new(
+    brokkr: &'a Brokkr,
+    ctx: T::Context,
+    timeout: time::Duration,
+    result_ttl: time::Duration,
+  ) -> Self {
     Self {
       brokkr,
       id: get_worker_id().to_owned(),
       status: Cell::new(WorkerStatus::Idle),
       context: ctx,
       timeout,
-      period,
+      period: time::Duration::from_millis(100),
+      result_ttl,
       heartbeat_period: time::Duration::from_millis(500),
       last_heartbeat: Cell::new(time::Instant::now()),
     }
@@ -587,7 +661,7 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
     }
     self.status.set(WorkerStatus::Idle);
     // TODO: Do both of these in one transaction.
-    self.brokkr.set_job_result(&job).unwrap();
+    self.brokkr.set_job_result(&job, &self.result_ttl).unwrap();
     self
       .brokkr
       .set_worker_job_and_status::<T, T::Result>(&self.id, self.status.get(), None)
@@ -598,6 +672,7 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
   /// Process a single task from the queue and exit. Exits immediatly if the
   /// queue is empty.
   ///
+  /// Use this to build your own processing loop if `process_many` doesn't fit.
   pub fn process_one(&self) {
     match self.brokkr.dequeue::<T, T::Result>().unwrap() {
       None => (),
@@ -611,9 +686,9 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
   ///
   /// # Arguments
   ///
-  /// * `wait_timeout` - Timeout to wait between polls (in ms)
+  /// * `wait_timeout` - Timeout in ms to wait between polls to the queue.
   ///
-  pub fn process_many(&self, wait_timeout: u64) {
+  pub fn process_many(&self, wait_timeout: time::Duration) {
     debug!("[Brokkr:Worker:{}] Starting processing loop.", self.id);
     self
       .brokkr
@@ -622,10 +697,9 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
 
     self.send_heartbeat();
 
-    let wait_dur = time::Duration::from_millis(wait_timeout);
     loop {
       self.process_one();
-      thread::sleep(wait_dur);
+      thread::sleep(wait_timeout);
       self.send_heartbeat();
     }
   }
@@ -634,7 +708,7 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
 // This should make sure that in the large majority of cases the worker
 // deregisters itself. For the casee where this doesn't trigger using the
 // heartbeat timstamp as some kind of timeout is a good fallback strategy.
-impl<'a, T: Encodable + Perform + Clone> Drop for Worker<'a, T> {
+impl<'a, T: Perform + Clone> Drop for Worker<'a, T> {
   fn drop(&mut self) {
     self.brokkr.deregister_worker(&self.id).unwrap();
   }
