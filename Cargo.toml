@@ -2,6 +2,21 @@
 name = "brokkr"
 version = "0.1.0"
 authors = ["lirsacc <c.lirsac@gmail.com>"]
+description = "Simple distributed task queue library for Rust."
+homepage = "https://github.com/lirsacc/brokkr"
+repository = "https://github.com/lirsacc/brokkr"
+keywords = ["redis", "queue", "distributed"]
+readme = "README.md"
+license = "MIT"
+
+include = [
+  "README.md",
+  "LICENSE",
+  "Cargo.toml",
+  "src/**/*",
+  "examples/**/*"
+]
+
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
