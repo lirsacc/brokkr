@@ -32,6 +32,7 @@ TODO
 In order of priority:
 
 - See `TODO|WARN|REVIEW` markers in the code
+- (More) tests
 - Implement per-job timeout and ttl for job results.
 - Clean up lifetimes & trait bounds
 - Better error handling:
@@ -40,11 +41,13 @@ In order of priority:
   - Go over the `unwrap()` cases and confirm that they cannot break. Make sure those that can yield human readable errors.
   - Detect dropped connections and retry / backoff mechanisms to handle temporary unavailability of the broker?
   - Automated retry strategy for failed job?
+  - ~~Provide explicit way to fail a job, not just `panic!`~~
+  - Provide backtrace from panicked threads (if possible)
 - Docs + test against older rust releases.
 - Hook for graceful shutdown of workers.
 - Implement monitoring (cli? web? both?)
 - Implement scheduling (see celery-beat / rust-scheduler)
-- Evaluate turning `Brokkr` into a trait and the current impl into `RedisBrokkr` in order to support various backends through one interface. Not all of the usual distributed task queue backends are going to be suitable but a Postgres one seems relevant (see [pq](https://github.com/malthe/pq/) in Python world).
+- Evaluate turning `Brokkr` into a trait and the current impl into `RedisBrokkr` in order to support various backends through one interface. Not all of the usual distributed task queue backends are going to be suitable but a Postgres one seems relevant (see [pq](https://github.com/malthe/pq/) in Python world). Same for `Worker` which could then be implemented to either not spawn threads or do more complex / powerful process isolation similar to what `batch-rs` does.
 
 
 Development

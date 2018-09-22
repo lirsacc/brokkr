@@ -1,12 +1,13 @@
 #[macro_use]
 extern crate serde_derive;
 
-extern crate uuid;
 extern crate pretty_env_logger;
+extern crate uuid;
 
 extern crate brokkr;
 
 use brokkr::{Brokkr, Perform, Worker};
+use std::result::Result;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -18,17 +19,21 @@ struct Task {
 
 impl Perform for Task {
   type Result = u64;
+  type Error = String;
   type Context = ();
 
-  fn process(&self, _: &Self::Context) -> Self::Result {
+  fn process(&self, _: &Self::Context) -> Result<Self::Result, Self::Error> {
     println!("Performing task id={}, msg={}", self.id, self.msg);
+    if self.id == 3 {
+      return Err("I don't like 3.".to_owned());
+    }
     if self.id == 5 {
       panic!("Not 5!");
     }
     if self.id == 8 {
       sleep(Duration::from_millis(1000));
     }
-    self.id + 100
+    Ok(self.id + 100)
   }
 }
 
@@ -36,7 +41,7 @@ fn main() {
   pretty_env_logger::init();
   let brokkr = Brokkr::new("default".into());
   let w: Worker<Task> = Worker::new(&brokkr, (), Duration::from_millis(500));
-  let mut job_ids: Vec<uuid::Uuid> = vec!();
+  let mut job_ids: Vec<uuid::Uuid> = vec![];
 
   // Clean up from previous runs.
   brokkr.clear_all().unwrap();
@@ -47,10 +52,11 @@ fn main() {
 
   for i in 0..10 {
     println!("Pushing job {}", i);
-    let job_id = brokkr.enqueue::<Task, u64>(Task {
-      id: i,
-      msg: format!("Foo {}", i),
-    }).unwrap();
+    let job_id = brokkr
+      .enqueue::<Task, u64>(Task {
+        id: i,
+        msg: format!("Foo {}", i),
+      }).unwrap();
     job_ids.push(job_id);
     sleep(d);
   }
@@ -66,10 +72,12 @@ fn main() {
   }
 
   let t = brokkr.dequeue::<Task, u64>().unwrap();
+  // Should be None
   println!("Fetched {:?}", t);
 
   brokkr.clear_queue().unwrap();
 
   let t = brokkr.dequeue::<Task, u64>().unwrap();
+  // Should be None
   println!("Fetched {:?}", t);
 }

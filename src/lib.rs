@@ -7,13 +7,12 @@
 
 #![deny(missing_docs)]
 
-// #[macro_use]
-// extern crate log;
+#[macro_use]
+extern crate log;
 #[macro_use]
 extern crate serde_derive;
 
 extern crate chrono;
-extern crate error_chain;
 extern crate redis;
 extern crate serde;
 extern crate serde_json;
@@ -28,9 +27,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
 
-use std::cell::Cell;
-use std::sync::mpsc;
-use std::{panic, process, str, thread, time, fmt};
+use std::{cell::Cell, fmt, panic, process, str, sync::mpsc, thread, time};
 
 pub use errors::{Error, Result};
 
@@ -42,17 +39,13 @@ static PREFIX: &'static str = "brokkr";
 /// If you need a password, the url should look something like this:
 /// `redis://:password@127.0.0.1/`.
 ///
-/// # Panics
-///
-/// Panics if Redis endpoint cannot be reached.
-///
-fn connect() -> Connection {
+fn connect() -> Result<Connection> {
   let url = match ::std::env::var("BROKKR_URL") {
     Ok(u) => u.to_owned(),
     _ => "redis://127.0.0.1/".to_owned(),
   };
-  let client = redis::Client::open(url.as_ref()).unwrap();
-  client.get_connection().unwrap()
+  let client = redis::Client::open(url.as_ref())?;
+  Ok(client.get_connection()?)
 }
 
 /// Represent data that is safe to be passed around either through the Redis
@@ -62,11 +55,11 @@ fn connect() -> Connection {
 /// simple structs should benefit from the provided default implementation.
 pub trait Encodable
 where
-  Self: DeserializeOwned + Serialize + Send + Sync,
+  Self: DeserializeOwned + Serialize + Send + Sync + Sized,
 {
 }
 
-impl<T: Sized + DeserializeOwned + Serialize + Send + Sync> Encodable for T {}
+impl<T: DeserializeOwned + Serialize + Send + Sync + Sized> Encodable for T {}
 
 /// Possible statuses of a `Worker` process.
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
@@ -86,8 +79,10 @@ pub enum JobState {
   Started,
   /// The job has finished successfully
   Success,
-  /// The job panicked
+  /// The job failed in an expected way
   Failed,
+  /// The job panicked
+  Panicked,
   /// The job timed out
   TimedOut,
 }
@@ -101,6 +96,9 @@ pub struct Job<T, R> {
   pub task: T,
   /// Result of processing the task
   pub result: Option<R>,
+  /// Failure information, that's the panic payload in case of panic or the
+  /// reported error in case of handled error
+  pub failure_info: Option<String>,
   /// Time when the job was created / queued
   pub created_at: NaiveDateTime,
   /// Time when processing started for this job
@@ -118,6 +116,7 @@ impl<T: Encodable, R: Encodable> Job<T, R> {
       task,
       id: Uuid::new_v4(),
       result: None,
+      failure_info: None,
       created_at: Utc::now().naive_utc(),
       started_at: None,
       processed_at: None,
@@ -148,11 +147,25 @@ impl<T: Encodable, R: Encodable> Job<T, R> {
     }
   }
 
-  fn fail(&mut self) -> Result<()> {
+  fn panic(&mut self, failure_info: &str) -> Result<()> {
     match self.state {
       JobState::Started => {
         self.processed_at = Some(Utc::now().naive_utc());
         self.result = None;
+        self.failure_info = Some(failure_info.to_owned());
+        self.state = JobState::Panicked;
+        Ok(())
+      }
+      _ => invalid_transition!(JobState::Panicked, self.state),
+    }
+  }
+
+  fn fail(&mut self, failure_info: &str) -> Result<()> {
+    match self.state {
+      JobState::Started => {
+        self.processed_at = Some(Utc::now().naive_utc());
+        self.result = None;
+        self.failure_info = Some(failure_info.to_owned());
         self.state = JobState::Failed;
         Ok(())
       }
@@ -175,23 +188,42 @@ impl<T: Encodable, R: Encodable> Job<T, R> {
 
 impl<T: fmt::Debug, R: fmt::Debug> fmt::Display for Job<T, R> {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-    write!(f, "Job({}, {:?}, {:?}, {:?})", self.id.to_hyphenated().to_string(), self.state, self.task, self.result)
+    write!(
+      f,
+      "Job({}, {:?}, {:?}, {:?})",
+      self.id.to_hyphenated().to_string(),
+      self.state,
+      self.task,
+      self.result
+    )
   }
 }
 
-
-fn _delete(conn: &redis::Connection, key: &str) -> Result<bool> {
+fn delete(conn: &redis::Connection, key: &str) -> Result<bool> {
   match conn.del(key)? {
     Value::Int(i) => Ok(i > 0),
     _ => unimplemented!(),
   }
 }
 
-/// Get the current machine / VM hostname.
-/// This should work on most Linux and OS X machines.
+fn delete_prefix(conn: &redis::Connection, prefix: &str) -> Result<()> {
+  // WARN: This may fail when there are too many keys, maybe a loop can work.
+  let res = cmd("EVAL")
+    .arg("redis.call('del', '_', unpack(redis.call('keys', ARGV[1])))")
+    .arg(0)
+    .arg(format!("{}*", prefix))
+    .query(conn)?;
+  match res {
+    Value::Nil => Ok(()),
+    _ => unimplemented!(),
+  }
+}
+
+// Get the current machine / VM hostname.
+// This should work on most Linux and OS X machines.
+// TODO: Couldn't initially get this to work correctly with libc which sounds
+// like a better solution.
 fn get_hostname() -> String {
-  // TODO: Couldn't initially get this to work correctly with libc which sounds
-  // like a better solution.
   let output = process::Command::new("hostname").output().unwrap();
   let mut s = String::from_utf8(output.stdout).unwrap();
   s.pop(); // trailing newline.
@@ -206,17 +238,19 @@ fn get_worker_id() -> String {
 /// logic associated with this task.
 pub trait Perform
 where
-  Self: panic::RefUnwindSafe + 'static,
+  Self: Encodable + panic::RefUnwindSafe + 'static,
 {
   /// The result type for this task.
   type Result: Encodable + panic::RefUnwindSafe + 'static;
+  /// The error type for this task
+  type Error: Encodable + panic::RefUnwindSafe + 'static;
   /// The type of the context value that will be given to this job's handler.
   /// This should be used to share long-lived objects such as database
   /// connections, global variables, etc.
   type Context: Clone + Send + Sync + panic::RefUnwindSafe + 'static;
 
   /// Process this task.
-  fn process(&self, c: &Self::Context) -> Self::Result;
+  fn process(&self, c: &Self::Context) -> ::std::result::Result<Self::Result, Self::Error>;
 }
 
 /// Interface with the Redis backend.
@@ -280,7 +314,7 @@ impl Brokkr {
   /// * `name` - Name of the queue.
   ///
   pub fn new(name: String) -> Self {
-    Self::with_connection(name, connect())
+    Self::with_connection(name, connect().unwrap())
   }
 
   /// Create a new `Brokkr` with an explicit Redis connection. Use this if the
@@ -305,7 +339,7 @@ impl Brokkr {
   ///
   pub fn with_connection(name: String, conn: Connection) -> Self {
     let queue_name = format!("{}:{}", PREFIX, name);
-     Self {
+    Self {
       name,
       queue_name,
       conn,
@@ -313,11 +347,11 @@ impl Brokkr {
   }
 
   fn worker_key(&self, id: &str) -> String {
-    format!("{}:{}:worker:{}", PREFIX, &self.name, id)
+    format!("{}:worker:{}", &self.queue_name, id)
   }
 
   fn job_key(&self, id: &Uuid) -> String {
-    format!("{}:{}:job:{}", PREFIX, &self.name, id)
+    format!("{}:job:{}", &self.queue_name, id)
   }
 
   /// Get the number of remaining tasks for this queue.
@@ -327,7 +361,7 @@ impl Brokkr {
 
   /// Delete all remaining entries in the task queue.
   pub fn clear_queue(&self) -> Result<()> {
-    _delete(&self.conn, &self.queue_name)?;
+    delete(&self.conn, &self.queue_name)?;
     Ok(())
   }
 
@@ -339,16 +373,7 @@ impl Brokkr {
   /// inconcistent state.
   ///
   pub fn clear_all(&self) -> Result<()> {
-    // WARN: This may fail when there are too many keys, maybe a loop can work.
-    let res = cmd("EVAL")
-      .arg("redis.call('del', '_', unpack(redis.call('keys', ARGV[1])))")
-      .arg(0)
-      .arg(format!("{}:{}:*", PREFIX, self.queue_name.to_owned()))
-      .query(&self.conn)?;
-    match res {
-      Value::Nil => Ok(()),
-      _ => unimplemented!(),
-    }
+    delete_prefix(&self.conn, &self.queue_name)
   }
 
   /// Push a task to the queue.
@@ -397,7 +422,8 @@ impl Brokkr {
       .arg("status")
       .arg(format!("{:?}", status))
       .arg("job")
-      .arg(serde_json::to_string(&job)?).query(&self.conn)?;
+      .arg(serde_json::to_string(&job)?)
+      .query(&self.conn)?;
     Ok(())
   }
 
@@ -414,17 +440,25 @@ impl Brokkr {
   }
 
   fn set_job_result<T: Encodable, R: Encodable>(&self, job: &Job<T, R>) -> Result<()> {
-    self.conn.set(&self.job_key(&job.id), serde_json::to_string(job)?)?;
+    self
+      .conn
+      .set(&self.job_key(&job.id), serde_json::to_string(job)?)?;
     Ok(())
   }
 
-  fn delete_job_result<T: Encodable, R: Encodable>(&self, job: &Job<T, R>) -> Result<()> {
-    _delete(&self.conn, &self.job_key(&job.id))?;
+  /// Delete result of a specific job from the backend
+  pub fn delete_job_result(&self, job_id: &Uuid) -> Result<()> {
+    delete(&self.conn, &self.job_key(&job_id))?;
     Ok(())
+  }
+
+  /// Delete results of all jobs in the queue from the backend
+  pub fn delete_all_job_results(&self) -> Result<()> {
+    delete_prefix(&self.conn, &format!("{}:job:", &self.queue_name))
   }
 
   fn deregister_worker(&self, worker_id: &str) -> Result<()> {
-    _delete(&self.conn, &self.worker_key(worker_id))?;
+    delete(&self.conn, &self.worker_key(worker_id))?;
     Ok(())
   }
 }
@@ -463,7 +497,7 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
   pub fn new(brokkr: &'a Brokkr, ctx: T::Context, timeout: time::Duration) -> Self {
     let period = time::Duration::from_millis(100);
     assert!(timeout >= period);
-    let s = Self {
+    Self {
       brokkr,
       id: get_worker_id().to_owned(),
       status: Cell::new(WorkerStatus::Idle),
@@ -472,23 +506,15 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
       period,
       heartbeat_period: time::Duration::from_millis(500),
       last_heartbeat: Cell::new(time::Instant::now()),
-    };
-    s.start();
-    s
-  }
-
-  fn start(&self) {
-    self
-      .brokkr
-      .set_worker_job_and_status::<T, T::Result>(&self.id, self.status.get(), None)
-      .unwrap();
-    self.send_heartbeat();
+    }
   }
 
   /// Send an heartbeat message to the Redis backend.
   fn send_heartbeat(&self) {
-    self.brokkr.send_worker_heartbeat(&self.id).unwrap();
-    self.last_heartbeat.set(time::Instant::now());
+    if time::Instant::now() - self.last_heartbeat.get() > self.heartbeat_period {
+      self.brokkr.send_worker_heartbeat(&self.id).unwrap();
+      self.last_heartbeat.set(time::Instant::now());
+    }
   }
 
   /// The actual work function.
@@ -498,6 +524,7 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
   /// the brokkr. This is meant to never crash and contain the crash of the
   /// provided process implementation.
   fn process(&self, job: &mut Job<T, T::Result>) {
+    debug!("[Brokkr:Worker:{}] Process Job {}.", self.id, job.id);
     self.status.set(WorkerStatus::Busy);
     self.send_heartbeat();
 
@@ -519,33 +546,43 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
     let _ = thread::spawn(move || {
       let cr = panic::catch_unwind(|| task.process(&ctx));
       // In case of error, the timeout was reached or parent was terminated
-      // and the channel is not available anymore. This should be safe to ignore.
+      // and the channel is not available anymore.
+      // This should be safe to ignore.
       sender.send(cr).unwrap_or(());
     });
 
-    // TODO: Make sure errors are handled correctly (save as much failure info
-    // as possible for reporting)
     loop {
       if elapsed > self.timeout {
         job.timeout().unwrap();
         break;
       }
 
-      if let Ok(r) = receiver.recv_timeout(self.period) { match r {
-        Ok(result) => {
-          job.succeed(result).unwrap();
-          break;
+      if let Ok(r) = receiver.recv_timeout(self.period) {
+        match r {
+          Ok(process_result) => {
+            match process_result {
+              Ok(result) => {
+                job.succeed(result).unwrap();
+              }
+              Err(error) => {
+                job.fail(&serde_json::to_string(&error).unwrap()).unwrap();
+              }
+            };
+          }
+          Err(e) => {
+            // TODO: Haven't found a clean  way to get a full backtrace out of
+            // the spawned thread yet but it would be a nice addition.
+            if let Some(e) = e.downcast_ref::<&'static str>() {
+              job.panic(e).unwrap();
+            } else {
+              job.panic("[Brokkr] An unknown error occured").unwrap();
+            }
+          }
         }
-        Err(err) => {
-          println!("Failed {:?}", err);
-          job.fail().unwrap();
-          break;
-        }
-      }}
-
-      if time::Instant::now() - self.last_heartbeat.get() > self.heartbeat_period {
-        self.send_heartbeat();
+        break;
       }
+
+      self.send_heartbeat();
       elapsed = time::Instant::now() - start;
     }
     self.status.set(WorkerStatus::Idle);
@@ -577,10 +614,19 @@ impl<'a, T: Encodable + Perform + Clone> Worker<'a, T> {
   /// * `wait_timeout` - Timeout to wait between polls (in ms)
   ///
   pub fn process_many(&self, wait_timeout: u64) {
+    debug!("[Brokkr:Worker:{}] Starting processing loop.", self.id);
+    self
+      .brokkr
+      .set_worker_job_and_status::<T, T::Result>(&self.id, self.status.get(), None)
+      .unwrap();
+
+    self.send_heartbeat();
+
     let wait_dur = time::Duration::from_millis(wait_timeout);
     loop {
       self.process_one();
       thread::sleep(wait_dur);
+      self.send_heartbeat();
     }
   }
 }
