@@ -40,7 +40,7 @@ impl Perform for Task {
 fn main() {
   pretty_env_logger::init();
 
-  let brokkr = Brokkr::new("default".into());
+  let brokkr = Brokkr::new("example_main".into());
 
   let w: Worker<Task> = Worker::new(
     &brokkr,

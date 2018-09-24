@@ -33,3 +33,4 @@ uuid = { version = "0.7", features = ["serde", "v4"] }
 
 [dev-dependencies]
 pretty_env_logger = "0.2"
+job_scheduler = "1.0"

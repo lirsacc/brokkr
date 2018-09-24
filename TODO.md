@@ -18,5 +18,5 @@ In order of priority:
 - Graceful shutdown of workers.
 - Evaluate using `crossbeam` or other threadpools to support parallelisation in the `Worker` itself.
 - Implement monitoring (cli? web? both?)
-- Implement scheduling (see celery-beat / rust-scheduler)
+- Implement scheduling (see celery-beat / rust-scheduler) -> Low prio, see [./examples/scheduler.rs](./examples/scheduler.rs) for now.
 - Evaluate turning `Brokkr` into a trait and the current impl into `RedisBrokkr` in order to support various backends through one interface. Not all of the usual distributed task queue backends are going to be suitable but a Postgres one seems relevant (see [pq](https://github.com/malthe/pq/) in Python world). Same for `Worker` which could then be implemented to either not spawn threads or do more complex / powerful process isolation similar to what `batch-rs` does.
