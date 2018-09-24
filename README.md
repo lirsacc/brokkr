@@ -1,6 +1,8 @@
 brokkr
 ======
 
+[![Build Status](https://travis-ci.org/lirsacc/brokkr.svg?branch=master)](https://travis-ci.org/lirsacc/brokkr)
+
 :construction: Work In Progress :construction:
 
 `brokkr` is a simple distributed task queue for Rust applications. It is backed by [Redis](https://redis.io/) and heavily inspired by [rq](http://python-rq.org/).

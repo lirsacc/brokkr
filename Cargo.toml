@@ -17,6 +17,9 @@ include = [
   "examples/**/*"
 ]
 
+[badges]
+travis-ci = { repository = "lirsacc/brokkr", branch = "master" }
+maintenance = { status = "experimental" }
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
