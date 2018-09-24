@@ -257,13 +257,14 @@ where
   type Context: Clone + Send + Sync + panic::RefUnwindSafe + 'static;
 
   /// Processing logic for this task.
+  ///
   /// Returning the `Result` type is considered a success for the task while
   /// returning the `Error` type will mark the job as failed, including the
   /// serialised error in the job metadata.
   ///
   /// You shoud try to avoid surfacing panics as much as possible, however if
   /// this function does panic, the `Worker` will catch it and mark the job as
-  /// panicked.
+  /// panicked, including the panic payload in the metadata.
   fn process(&self, c: &Self::Context) -> ::std::result::Result<Self::Result, Self::Error>;
 }
 

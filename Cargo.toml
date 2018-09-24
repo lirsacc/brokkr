@@ -1,6 +1,6 @@
 [package]
 name = "brokkr"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["lirsacc <c.lirsac@gmail.com>"]
 description = "Simple distributed task queue library for Rust."
 homepage = "https://github.com/lirsacc/brokkr"
